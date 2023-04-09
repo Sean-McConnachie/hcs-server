@@ -1,0 +1,7 @@
+[package]
+name = "hcs_server"
+version = "0.1.0"
+edition = "2021"
+authors = ["Sean McConnachie <seanjulian.mcc@gmail.com>"]
+
+[dependencies]
