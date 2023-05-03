@@ -5,3 +5,20 @@ edition = "2021"
 authors = ["Sean McConnachie <seanjulian.mcc@gmail.com>"]
 
 [dependencies]
+hcs_lib = { path = "../hcs-lib", version = "0.1.0", features = [
+    "server_suite",
+] }
+
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+toml = "0.7.3"
+bincode = "1.3.3"
+
+# Database
+sqlx = { version = "0.6.3", features = [
+    "postgres",
+    "runtime-tokio-native-tls",
+] }
+
+tokio = { version = "1.26.0", features = ["full"] }
+async-trait = "0.1.68"

@@ -1,0 +1,12 @@
+log_level = "trace"
+
+[db_config]
+database_url = "postgres://postgres:12341234@localhost/hcs_testing"
+max_connections = 10
+
+
+[tcp_config]
+addr = "127.0.0.1:3000"
+
+[file_handler_config]
+storage_directory = "_storage_directory"
