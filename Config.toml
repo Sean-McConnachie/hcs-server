@@ -1,7 +1,7 @@
 log_level = "trace"
 
 [db_config]
-database_url = "postgres://postgres:12341234@localhost/hcs_testing"
+database_url = "postgres://postgres:12341234@localhost/hcs"
 max_connections = 10
 
 

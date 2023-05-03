@@ -1,3 +1,4 @@
+use std::collections::LinkedList;
 use std::net as s_net;
 
 use hcs_lib::protocol::server::HCSProtocol;
@@ -49,24 +50,10 @@ pub fn transmission_type_to_bytes(
     Ok(bytes)
 }
 
-// enum TransmissionStage {
-//     Receiving,
-//     Complete,
-// }
-
-// enum TransmissionStatus {
-//     Greeting,
-//     Unknown,
-//     SyncServerToClient(TransmissionStage),
-//     SyncClientToServer(TransmissionStage),
-//     SyncComplete,
-// }
-
 struct TcpHCSHandler {
     tcp_connection: Box<protocol::TcpConnection>,
     db_pool: sqlx::PgPool,
     file_handler_config: server_database::ServerFileHandlerConfig,
-    // current_transmission_status: TransmissionStatus,
 }
 
 impl TcpHCSHandler {
@@ -80,11 +67,12 @@ impl TcpHCSHandler {
             tcp_connection,
             db_pool,
             file_handler_config,
-            // current_transmission_status: TransmissionStatus::Greeting,
         }
     }
 
     async fn start_transmission(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        log::info!("Starting transmission");
+        log::debug!("Waiting for greeting");
         // Receive greeting from client
         let bytes = self.tcp_connection.read_next_chunk()?;
         let transmission = bytes_to_transmission_type(&bytes)?;
@@ -93,12 +81,12 @@ impl TcpHCSHandler {
         })?;
         let response = self.greet(greeting).await;
 
+        log::debug!("Sending response");
         // Send response to client (either proceed or error)
         self.tcp_connection
             .write(&transmission_type_to_bytes(response)?)?;
 
-        // self.current_transmission_status = TransmissionStatus::Unknown;
-
+        log::debug!("Starting payload loop");
         loop {
             let bytes = self.tcp_connection.read_next_chunk()?;
             let transmission = bytes_to_transmission_type(&bytes)?;
@@ -107,7 +95,7 @@ impl TcpHCSHandler {
             if let Ok(_end_transmission) = end_transmission {
                 break;
             } else {
-                todo!("Handle error")
+                dbg!(&end_transmission);
             }
         }
 
@@ -135,6 +123,7 @@ impl HCSProtocol<data::Transmission<errors::ServerTcpError, extra_data::ExtraDat
     ) -> Result<bool, Box<dyn std::error::Error>> {
         match payload {
             data::Transmission::SyncClientToServer(sync_client_to_server) => {
+                log::debug!("Handling sync client to server");
                 handle_sync_client_to_server(
                     &mut self.tcp_connection,
                     &self.db_pool,
@@ -144,6 +133,7 @@ impl HCSProtocol<data::Transmission<errors::ServerTcpError, extra_data::ExtraDat
                 .await?;
             }
             data::Transmission::SyncServerToClient(sync_server_to_client) => {
+                log::debug!("Handling sync server to client");
                 handle_sync_server_to_client(
                     &mut self.tcp_connection,
                     &self.db_pool,
@@ -174,6 +164,57 @@ impl HCSProtocol<data::Transmission<errors::ServerTcpError, extra_data::ExtraDat
     // }
 }
 
+async fn handle_server_to_client_change_event(
+    tcp_connection: &mut Box<protocol::TcpConnection>,
+    db_pool: &sqlx::PgPool,
+    file_handler_config: &server_database::ServerFileHandlerConfig,
+    change_event: data::ChangeEvent,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match change_event {
+        data::ChangeEvent::File(file_event) => match file_event {
+            data::FileEvent::Create(file_create) => {
+                sync_server_to_client::handle_file_create(
+                    tcp_connection,
+                    file_handler_config,
+                    file_create,
+                )?;
+            }
+            data::FileEvent::Delete(file_delete) => {
+                sync_server_to_client::handle_file_delete(tcp_connection, file_delete)?;
+            }
+            data::FileEvent::Modify(file_modify) => {
+                sync_server_to_client::handle_file_modify(
+                    tcp_connection,
+                    file_handler_config,
+                    file_modify,
+                )?;
+            }
+            data::FileEvent::Move(file_move) => {
+                sync_server_to_client::handle_file_move(tcp_connection, file_move)?;
+            }
+            data::FileEvent::UndoDelete(_file_undo_delete) => {
+                unimplemented!("Undo delete file")
+            }
+        },
+        data::ChangeEvent::Directory(directory_event) => match directory_event {
+            data::DirectoryEvent::Create(directory_create) => {
+                sync_server_to_client::handle_directory_create(tcp_connection, directory_create)?;
+            }
+            data::DirectoryEvent::Delete(directory_delete) => {
+                sync_server_to_client::handle_directory_delete(tcp_connection, directory_delete)?;
+            }
+            data::DirectoryEvent::Move(directory_move) => {
+                sync_server_to_client::handle_directory_move(tcp_connection, directory_move)?;
+            }
+            data::DirectoryEvent::UndoDelete(_directory_undo_delete) => {
+                unimplemented!("Undo delete directory")
+            }
+        },
+        _ => unimplemented!(),
+    }
+    Ok(())
+}
+
 async fn handle_sync_server_to_client(
     tcp_connection: &mut Box<protocol::TcpConnection>,
     db_pool: &sqlx::PgPool,
@@ -184,69 +225,58 @@ async fn handle_sync_server_to_client(
     let client_version = sync_server_to_client.client_version();
 
     let changes = server_database::get_changes(client_version, server_version, db_pool).await?;
+    let changes = changes
+        .into_iter()
+        .map(|change| change.into())
+        .collect::<LinkedList<_>>();
     let optimized_changes = data::optimize_changes(changes);
 
-    for chain in optimized_changes {
-        for change_event in chain {
-            // let transmission =
-            //     data::Transmission::<errors::ServerTcpError, extra_data::ExtraData>::ChangeEvent(
-            //         change_event.clone().into(),
-            //     );
-            // let bytes = transmission_type_to_bytes(transmission)?;
-            // tcp_connection.write(&*bytes)?;
-
-            match change_event {
-                data::ChangeEvent::File(file_event) => match file_event {
-                    data::FileEvent::Create(file_create) => {
-                        sync_server_to_client::handle_file_create(
-                            tcp_connection,
-                            file_handler_config,
-                            file_create,
-                        )?;
-                    }
-                    data::FileEvent::Delete(file_delete) => {
-                        sync_server_to_client::handle_file_delete(tcp_connection, file_delete)?;
-                    }
-                    data::FileEvent::Modify(file_modify) => {
-                        sync_server_to_client::handle_file_modify(
-                            tcp_connection,
-                            file_handler_config,
-                            file_modify,
-                        )?;
-                    }
-                    data::FileEvent::Move(file_move) => {
-                        sync_server_to_client::handle_file_move(tcp_connection, file_move)?;
-                    }
-                    data::FileEvent::UndoDelete(_file_undo_delete) => {
-                        unimplemented!("Undo delete file")
-                    }
-                },
-                data::ChangeEvent::Directory(directory_event) => match directory_event {
-                    data::DirectoryEvent::Create(directory_create) => {
-                        sync_server_to_client::handle_directory_create(
-                            tcp_connection,
-                            directory_create,
-                        )?;
-                    }
-                    data::DirectoryEvent::Delete(directory_delete) => {
-                        sync_server_to_client::handle_directory_delete(
-                            tcp_connection,
-                            directory_delete,
-                        )?;
-                    }
-                    data::DirectoryEvent::Move(directory_move) => {
-                        sync_server_to_client::handle_directory_move(
-                            tcp_connection,
-                            directory_move,
-                        )?;
-                    }
-                    data::DirectoryEvent::UndoDelete(_directory_undo_delete) => {
-                        unimplemented!("Undo delete directory")
-                    }
-                },
-                _ => unimplemented!(),
+    let change_len = optimized_changes.len();
+    for (i, change_event) in optimized_changes.into_iter().enumerate() {
+        log::info!("Sending change event {}/{}", i + 1, change_len);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        match handle_server_to_client_change_event(
+            tcp_connection,
+            db_pool,
+            file_handler_config,
+            change_event.1,
+        )
+        .await
+        {
+            Ok(_) => {}
+            Err(err) => {
+                log::error!("Error handling server to client change event: {}", err);
+                let skip_current = data::Transmission::<
+                    errors::ServerTcpError,
+                    extra_data::ExtraData,
+                >::SkipCurrent;
+                let bytes = transmission_type_to_bytes(skip_current)?;
+                tcp_connection.write(&bytes)?;
             }
+        };
+        {
+            // send new server version to client
+            let sv = if i == change_len - 1 {
+                data::ServerVersion::new(server_version)
+            } else {
+                data::ServerVersion::new(change_event.0)
+            };
+            let transmission =
+                data::Transmission::<errors::ServerTcpError, extra_data::ExtraData>::ServerVersion(
+                    sv,
+                );
+            let bytes = transmission_type_to_bytes(transmission)?;
+            tcp_connection.write(&bytes)?;
         }
+    }
+
+    {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        // send transaction complete
+        let transmission =
+            data::Transmission::<errors::ServerTcpError, extra_data::ExtraData>::TransactionComplete;
+        let bytes = transmission_type_to_bytes(transmission)?;
+        tcp_connection.write(&bytes)?;
     }
 
     Ok(())
@@ -259,9 +289,11 @@ async fn handle_sync_client_to_server(
     sync_client_to_server: data::SyncClientToServer,
 ) -> Result<(), Box<dyn std::error::Error>> {
     {
+        log::debug!("Handling sync client to server. Checking if client is in sync with server.");
         // Check if client is in sync with the server. If no, sync_server_to_client first
         let server_version = server_database::get_server_version(db_pool).await?;
         if server_version != sync_client_to_server.client_version() {
+            log::debug!("Client is not in sync with server. Sending sync_server_to_client first.");
             let transmission =
                 data::Transmission::<errors::ServerTcpError, extra_data::ExtraData>::ServerVersion(
                     data::ServerVersion::new(server_version),
@@ -269,13 +301,24 @@ async fn handle_sync_client_to_server(
             let bytes = transmission_type_to_bytes(transmission)?;
             tcp_connection.write(&*bytes)?;
             return Ok(());
+        } else {
+            log::debug!("Client is in sync with server.");
+            // Proceed
+            let transmission =
+                data::Transmission::<errors::ServerTcpError, extra_data::ExtraData>::Proceed;
+            let bytes = transmission_type_to_bytes(transmission)?;
+            tcp_connection.write(&*bytes)?;
         }
     }
 
     {
         // Iterate num_changes and receive changes
         for change_num in 0..sync_client_to_server.number_of_changes() {
-            log::info!("Change number: {}", change_num);
+            log::info!(
+                "Change number: {} of {}",
+                change_num + 1,
+                sync_client_to_server.number_of_changes()
+            );
             let bytes = tcp_connection.read_next_chunk()?;
             let transmission = bytes_to_transmission_type(bytes)?;
             match transmission {
@@ -353,13 +396,17 @@ async fn handle_sync_client_to_server(
                 _ => unimplemented!(),
             }
         }
-        let server_version = server_database::get_server_version(db_pool).await?;
-        let transmission =
-            data::Transmission::<errors::ServerTcpError, extra_data::ExtraData>::ServerVersion(
-                data::ServerVersion::new(server_version),
-            );
-        let bytes = transmission_type_to_bytes(transmission)?;
-        tcp_connection.write(&*bytes)?;
+
+        {
+            log::debug!("Sending new server version to client.");
+            let server_version = server_database::get_server_version(db_pool).await?;
+            let transmission =
+                data::Transmission::<errors::ServerTcpError, extra_data::ExtraData>::ServerVersion(
+                    data::ServerVersion::new(server_version),
+                );
+            let bytes = transmission_type_to_bytes(transmission)?;
+            tcp_connection.write(&*bytes)?;
+        }
     }
 
     Ok(())

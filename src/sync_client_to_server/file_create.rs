@@ -15,7 +15,9 @@ pub async fn handle_file_create(
             .join(file_create.path()),
     )?;
     for _ in 0..packets {
+        log::debug!("Reading next chunk");
         let buffer = tcp_connection.read_next_chunk()?;
+        log::debug!("Writing next chunk");
         file.write(buffer)?;
     }
 

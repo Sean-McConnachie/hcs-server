@@ -12,5 +12,7 @@ async fn main() {
         .await
         .expect("Failed to connect to database");
 
+    server_database::initialize_db(&db_pool).await.unwrap();
+
     serve::tcp_handler(db_pool, config).await;
 }
