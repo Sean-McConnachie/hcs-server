@@ -6,10 +6,11 @@ use hcs_lib::{data, protocol, server_database};
 
 use crate::{config, errors, extra_data, sync_client_to_server, sync_server_to_client};
 
+static SLEEP_TIME: u64 = 5;
+
 pub async fn tcp_handler(db_pool: sqlx::PgPool, config: config::ServerConfig) {
     let listener = s_net::TcpListener::bind(config.tcp_config().addr())
         .expect("Failed to bind to TCP address");
-    dbg!(&config);
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
@@ -166,7 +167,6 @@ impl HCSProtocol<data::Transmission<errors::ServerTcpError, extra_data::ExtraDat
 
 async fn handle_server_to_client_change_event(
     tcp_connection: &mut Box<protocol::TcpConnection>,
-    db_pool: &sqlx::PgPool,
     file_handler_config: &server_database::ServerFileHandlerConfig,
     change_event: data::ChangeEvent,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -232,12 +232,21 @@ async fn handle_sync_server_to_client(
     let optimized_changes = data::optimize_changes(changes);
 
     let change_len = optimized_changes.len();
+
+    if optimized_changes.len() == 0 {
+        log::error!("Sending new server version {}", server_version);
+        let sv = data::ServerVersion::new(server_version);
+        let transmission =
+            data::Transmission::<errors::ServerTcpError, extra_data::ExtraData>::ServerVersion(sv);
+        let bytes = transmission_type_to_bytes(transmission)?;
+        tcp_connection.write(&bytes)?;
+    }
+
     for (i, change_event) in optimized_changes.into_iter().enumerate() {
         log::info!("Sending change event {}/{}", i + 1, change_len);
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::thread::sleep(std::time::Duration::from_millis(SLEEP_TIME));
         match handle_server_to_client_change_event(
             tcp_connection,
-            db_pool,
             file_handler_config,
             change_event.1,
         )
@@ -254,6 +263,7 @@ async fn handle_sync_server_to_client(
                 tcp_connection.write(&bytes)?;
             }
         };
+        std::thread::sleep(std::time::Duration::from_millis(SLEEP_TIME));
         {
             // send new server version to client
             let sv = if i == change_len - 1 {
@@ -271,7 +281,7 @@ async fn handle_sync_server_to_client(
     }
 
     {
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::thread::sleep(std::time::Duration::from_millis(SLEEP_TIME));
         // send transaction complete
         let transmission =
             data::Transmission::<errors::ServerTcpError, extra_data::ExtraData>::TransactionComplete;
@@ -395,17 +405,18 @@ async fn handle_sync_client_to_server(
                 },
                 _ => unimplemented!(),
             }
-        }
-
-        {
-            log::debug!("Sending new server version to client.");
-            let server_version = server_database::get_server_version(db_pool).await?;
-            let transmission =
-                data::Transmission::<errors::ServerTcpError, extra_data::ExtraData>::ServerVersion(
-                    data::ServerVersion::new(server_version),
-                );
-            let bytes = transmission_type_to_bytes(transmission)?;
-            tcp_connection.write(&*bytes)?;
+            {
+                log::debug!("Sending new server version to client.");
+                let server_version = server_database::get_server_version(db_pool).await?;
+                let transmission = data::Transmission::<
+                    errors::ServerTcpError,
+                    extra_data::ExtraData,
+                >::ServerVersion(data::ServerVersion::new(
+                    server_version,
+                ));
+                let bytes = transmission_type_to_bytes(transmission)?;
+                tcp_connection.write(&*bytes)?;
+            }
         }
     }
 
